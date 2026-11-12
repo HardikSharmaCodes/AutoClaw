@@ -11,7 +11,13 @@ final class ServantModel: ObservableObject {
     @Published var sessions: [SessionInfo] = []
     @Published var isRunning = false
     @Published var currentProject: String?
-    @Published var logTail: [String] = []
+    struct LogLine: Identifiable { let id: Int; let text: String }
+    @Published var logTail: [LogLine] = []
+    private var logCounter = 0
+    /// Time ranges during which Servant's own `claude -p` sessions were active (excluded from "user activity").
+    private var ownRuns: [(start: Date, end: Date)] = []
+    private var runStart: Date?
+    private var refreshing = false
     @Published var pendingAsk = false
     @Published var launchAtLogin = SMAppService.mainApp.status == .enabled
     @Published private(set) var state: ServantState
@@ -28,8 +34,7 @@ final class ServantModel: ObservableObject {
     func start() {
         Notifier.shared.onAnswer = { [weak self] yes in self?.answer(yes) }
         Notifier.shared.onOpenAsk = { [weak self] in self?.showAskAlert() }
-        Notifier.shared.setup()
-        refresh()
+        Notifier.shared.setup { [weak self] in self?.refresh() }   // first refresh once authorization is known
         timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in
             Task { @MainActor in ServantModel.shared.refresh() }
         }
@@ -49,14 +54,36 @@ final class ServantModel: ObservableObject {
         return until
     }
 
-    var activeSessions: [SessionInfo] {
-        sessions.filter { Date().timeIntervalSince($0.lastActivity) < 5 * 60 }
+    /// Sessions started by you, i.e. not by Servant's own unattended runs.
+    var userSessions: [SessionInfo] {
+        sessions.filter { s in
+            !ownRuns.contains { s.lastActivity >= $0.start && s.lastActivity <= $0.end.addingTimeInterval(120) }
+                && !(runStart.map { s.lastActivity >= $0 } ?? false)
+        }
     }
 
+    var activeSessions: [SessionInfo] {
+        userSessions.filter { Date().timeIntervalSince($0.lastActivity) < 5 * 60 }
+    }
+
+    /// File reads happen off the main thread; results are applied on it.
     func refresh() {
-        config = ConfigStore.loadOrCreate()   // pick up manual edits to config.json
-        usage = UsageReader.read()
-        sessions = SessionTracker.recent()
+        guard !refreshing else { return }
+        refreshing = true
+        Task.detached(priority: .utility) {
+            let cfg = ConfigStore.loadOrCreate()   // picks up manual edits to config.json
+            let usage = UsageReader.read()
+            let sessions = SessionTracker.recent()
+            await MainActor.run {
+                let m = ServantModel.shared
+                m.config = cfg; m.usage = usage; m.sessions = sessions
+                m.refreshing = false
+                m.evaluate()
+            }
+        }
+    }
+
+    private func evaluate() {
         let now = Date()
 
         if let until = limitedUntil {
@@ -75,25 +102,33 @@ final class ServantModel: ObservableObject {
             state.limitHitUntil = nil
             state.lastAskedAt = now
             save()
-            if !isRunning { pendingAsk = true }
+            if !isRunning, config.projects.contains(where: { $0.enabled }) { pendingAsk = true }
             return
         }
 
-        let idleFor = sessions.first.map { now.timeIntervalSince($0.lastActivity) } ?? .infinity
+        // Limit cleared early (threshold changed, fresh usage data): drop the reset notification still scheduled.
+        if state.waitingForReset != nil, state.waitingForReset! > now {
+            Notifier.shared.cancel(id: Self.resetNoticeID)
+            state.waitingForReset = nil
+            save()
+        }
+
+        let idleFor = userSessions.first.map { now.timeIntervalSince($0.lastActivity) } ?? .infinity
         let cooledDown = state.lastAskedAt.map { now.timeIntervalSince($0) > config.askCooldownHours * 3600 } ?? true
         if config.autoAskWhenIdle, !isRunning, !pendingAsk, cooledDown,
            idleFor > config.idleMinutesBeforeAsking * 60,
            config.projects.contains(where: { $0.enabled }) {
-            ask()
+            ask(interactive: false)
         }
     }
 
-    func ask() {
+    /// `interactive` = the user explicitly asked ("Ask me now"); only then may a modal dialog appear.
+    func ask(interactive: Bool = true) {
         pendingAsk = true
         state.lastAskedAt = Date()
         save()
         Notifier.shared.post(title: "Claude session is free", body: Notifier.askQuestion, ask: true)
-        if !Notifier.shared.authorized { showAskAlert() }
+        if interactive && !Notifier.shared.authorized { showAskAlert() }
     }
 
     func showAskAlert() {
@@ -120,25 +155,32 @@ final class ServantModel: ObservableObject {
         guard !projects.isEmpty else { return }
         isRunning = true
         logTail = []
+        runStart = Date()
         Task {
             var lines: [String] = []
             for p in projects {
                 currentProject = p.name
                 appendLog("▶︎ \(p.name)")
                 let r = ProjectRunner(config: config, project: p) { line in
-                    Task { @MainActor in ServantModel.shared.appendLog(line) }
+                    DispatchQueue.main.async { ServantModel.shared.appendLog(line) }
                 }
                 runner = r
                 let out = await r.run()
                 lines.append("\(p.name): \(out.headline)")
                 if out.hitLimit {
-                    state.limitHitUntil = usage?.fiveHourResetsAt.flatMap { $0 > Date() ? $0 : nil } ?? Date().addingTimeInterval(3600)
+                    let th = config.limitThresholdPercent
+                    let weekly = (usage?.sevenDayPct ?? 0) >= th ? usage?.sevenDayResetsAt : nil
+                    let fiveH = usage?.fiveHourResetsAt
+                    state.limitHitUntil = [weekly, fiveH].compactMap { $0 }.filter { $0 > Date() }.max()
+                        ?? Date().addingTimeInterval(3600)
                 }
                 if r.cancelled || out.hitLimit { break }
             }
             runner = nil
             currentProject = nil
             isRunning = false
+            if let s = runStart { ownRuns.append((s, Date())); ownRuns = Array(ownRuns.suffix(50)) }
+            runStart = nil
             let summary = lines.joined(separator: "\n")
             state.lastRunAt = Date()
             state.lastRunSummary = summary
@@ -151,7 +193,8 @@ final class ServantModel: ObservableObject {
     func stopRun() { runner?.cancel() }
 
     func appendLog(_ s: String) {
-        logTail.append(s)
+        logCounter += 1
+        logTail.append(LogLine(id: logCounter, text: s))
         if logTail.count > 200 { logTail.removeFirst(logTail.count - 200) }
     }
 

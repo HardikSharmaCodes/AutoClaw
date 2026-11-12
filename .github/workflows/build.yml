@@ -1,12 +1,26 @@
 name: Build
 on:
   push:
+    branches: [main]
+    paths-ignore: ['**.md', 'docs/**']
   pull_request:
+    paths-ignore: ['**.md', 'docs/**']
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
 jobs:
   build:
     runs-on: macos-15
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: .build
+          key: spm-${{ runner.os }}-${{ hashFiles('Package.swift', 'Sources/**') }}
+          restore-keys: spm-${{ runner.os }}-
       - name: Build app bundle
         run: ./scripts/build_app.sh
       - name: Zip
@@ -15,3 +29,4 @@ jobs:
         with:
           name: ClaudeServant
           path: build/ClaudeServant.zip
+          compression-level: 0

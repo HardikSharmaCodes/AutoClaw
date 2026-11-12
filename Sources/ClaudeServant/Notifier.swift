@@ -10,13 +10,20 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     var onOpenAsk: (() -> Void)?
     private(set) var authorized = false
 
-    func setup() {
+    /// `ready` is called on the main thread once the authorization result is known.
+    func setup(ready: @escaping () -> Void) {
         let c = UNUserNotificationCenter.current()
         c.delegate = self
         let yes = UNNotificationAction(identifier: "YES", title: "Yes, work on projects", options: [])
         let no = UNNotificationAction(identifier: "NO", title: "No thanks", options: [])
         c.setNotificationCategories([UNNotificationCategory(identifier: Self.askCategory, actions: [yes, no], intentIdentifiers: [], options: [])])
-        c.requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in self.authorized = granted }
+        c.requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
+            DispatchQueue.main.async { self.authorized = granted; ready() }
+        }
+    }
+
+    func cancel(id: String) {
+        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [id])
     }
 
     func post(id: String = UUID().uuidString, title: String, body: String, ask: Bool = false, at date: Date? = nil) {

@@ -4,7 +4,7 @@
 # Used by Claude during unattended Claude Servant runs.
 set -euo pipefail
 URL="${1:?url required}"; OUT="${2:?output path required}"
-W="${3:-1440}"; H="${4:-900}"; WAIT="${5:-10000}"
+W="${3:-1440}"; H="${4:-900}"; WAIT="${5:-5000}"
 case "$OUT" in /*) ;; *) OUT="$PWD/$OUT" ;; esac
 
 BROWSER="${SERVANT_BROWSER:-}"
@@ -24,5 +24,7 @@ trap 'rm -rf "$PROFILE"' EXIT
 "$BROWSER" --headless=new --hide-scrollbars --no-first-run --no-default-browser-check \
   --enable-unsafe-swiftshader --user-data-dir="$PROFILE" \
   --window-size="${W},${H}" --virtual-time-budget="$WAIT" \
-  --screenshot="$OUT" "$URL" >/dev/null 2>&1
+  --screenshot="$OUT" "$URL" >"$PROFILE.log" 2>&1 || { tail -20 "$PROFILE.log" >&2; rm -f "$PROFILE.log"; exit 1; }
+rm -f "$PROFILE.log"
+[ -s "$OUT" ] || { echo "Screenshot was not created." >&2; exit 1; }
 ls -la "$OUT"

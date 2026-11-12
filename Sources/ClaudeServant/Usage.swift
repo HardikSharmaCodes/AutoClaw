@@ -52,6 +52,7 @@ struct SessionInfo: Identifiable {
 
 enum SessionTracker {
     private static var cwdCache: [String: String] = [:]
+    private static let cacheLock = NSLock()
 
     static func recent(within hours: Double = 24) -> [SessionInfo] {
         let fm = FileManager.default
@@ -72,13 +73,14 @@ enum SessionTracker {
     }
 
     private static func cwdFor(_ url: URL) -> String? {
-        if let c = cwdCache[url.path] { return c }
+        cacheLock.lock(); let cached = cwdCache[url.path]; cacheLock.unlock()
+        if let c = cached { return c }
         guard let h = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? h.close() }
         let head = String(decoding: h.readData(ofLength: 256 * 1024), as: UTF8.self)
         guard let r = head.range(of: #""cwd":"([^"]+)""#, options: .regularExpression) else { return nil }
         let cwd = String(String(head[r]).dropFirst("\"cwd\":\"".count).dropLast())
-        cwdCache[url.path] = cwd
+        cacheLock.lock(); cwdCache[url.path] = cwd; cacheLock.unlock()
         return cwd
     }
 }

@@ -135,12 +135,12 @@ struct MenuContent: View {
             HStack {
                 Text("Sessions (24h)").font(.subheadline.bold())
                 Spacer()
-                Text("\(model.sessions.count) total · \(model.activeSessions.count) active").font(.caption).foregroundStyle(.secondary)
+                Text("\(model.userSessions.count) total · \(model.activeSessions.count) active").font(.caption).foregroundStyle(.secondary)
             }
-            if model.sessions.isEmpty {
+            if model.userSessions.isEmpty {
                 Text("No Claude Code sessions in the last 24 hours.").font(.caption).foregroundStyle(.secondary)
             }
-            ForEach(model.sessions.prefix(5)) { s in
+            ForEach(model.userSessions.prefix(5)) { s in
                 HStack {
                     Circle().fill(Date().timeIntervalSince(s.lastActivity) < 300 ? Color.green : Color.secondary.opacity(0.4))
                         .frame(width: 6, height: 6)
@@ -227,15 +227,15 @@ struct MenuContent: View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 2) {
-                    ForEach(Array(model.logTail.enumerated()), id: \.offset) { i, line in
-                        Text(line).font(.system(size: 10, design: .monospaced)).lineLimit(3).id(i)
+                    ForEach(model.logTail) { line in
+                        Text(line.text).font(.system(size: 10, design: .monospaced)).lineLimit(3).id(line.id)
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading)
             }
             .frame(height: 140)
             .padding(6)
             .background(RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.1)))
-            .onChange(of: model.logTail.count) { _, n in proxy.scrollTo(n - 1, anchor: .bottom) }
+            .onChange(of: model.logTail.last?.id) { _, id in if let id { proxy.scrollTo(id, anchor: .bottom) } }
         }
     }
 
@@ -245,7 +245,7 @@ struct MenuContent: View {
                 .toggleStyle(.checkbox).font(.caption)
             Spacer()
             Menu("More") {
-                Button("Ask me now") { model.ask() }
+                Button("Ask me now") { model.ask(interactive: true) }
                 Button("Refresh") { model.refresh() }
                 Button("Edit config…") { model.openConfig() }
                 Button("Open logs folder") { model.openLogs() }

@@ -1,7 +1,9 @@
 // Renders Resources/AppIcon.icns. Run: swift scripts/make_icon.swift
 import AppKit
 
-let sizes = [16, 32, 64, 128, 256, 512, 1024]
+let sizes = [16, 32, 128, 256, 512]
+// Work from the repo root regardless of where the script is run from.
+FileManager.default.changeCurrentDirectoryPath(URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().path)
 let iconset = URL(fileURLWithPath: "build/AppIcon.iconset")
 try? FileManager.default.removeItem(at: iconset)
 try! FileManager.default.createDirectory(at: iconset, withIntermediateDirectories: true)
@@ -28,7 +30,7 @@ func render(_ px: Int) -> Data {
     return rep.representation(using: .png, properties: [:])!
 }
 
-for px in sizes where px <= 512 {
+for px in sizes {
     try! render(px).write(to: iconset.appendingPathComponent("icon_\(px)x\(px).png"))
     try! render(px * 2).write(to: iconset.appendingPathComponent("icon_\(px)x\(px)@2x.png"))
 }

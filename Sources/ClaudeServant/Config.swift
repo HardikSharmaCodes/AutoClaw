@@ -9,6 +9,7 @@ enum Paths {
     static let logs = servantDir.appendingPathComponent("logs")
     static let screenshotTool = servantDir.appendingPathComponent("bin/screenshot.sh")
     static let claudeProjects = home.appendingPathComponent(".claude/projects")
+    static let screenshots = servantDir.appendingPathComponent("screenshots")
 
     static func expand(_ path: String) -> String {
         (path as NSString).expandingTildeInPath
@@ -74,7 +75,8 @@ struct ProjectConfig: Codable, Identifiable, Hashable {
                 let body = scripts[script] ?? ""
                 var cmd = ["npm", "run", script]
                 if body.contains("next") { cmd += ["--", "-p", "{{PORT}}"] }
-                else if body.contains("vite") || body.contains("astro") { cmd += ["--", "--port", "{{PORT}}"] }
+                else if body.contains("vite") { cmd += ["--", "--port", "{{PORT}}", "--strictPort"] }
+                else if body.contains("astro") { cmd += ["--", "--port", "{{PORT}}"] }
                 p.devCommand = cmd
                 let used = Set(existing.compactMap(\.devPort))
                 var port = 3123
@@ -101,34 +103,58 @@ struct ServantConfig: Codable {
 
     static let defaultAllowedTools = [
         "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
-        "Bash(git add:*)", "Bash(git commit:*)", "Bash(git push:*)",
+        "Bash(git add:*)", "Bash(git commit:*)", "Bash(git push)",
         "Bash(git restore:*)", "Bash(git checkout -- :*)",
         "Bash(npm run lint:*)", "Bash(npm run build:*)", "Bash(npm run test:*)", "Bash(npm test:*)",
-        "Bash(npx eslint:*)", "Bash(npx tsc:*)",
-        "Bash(curl -s http://localhost:*)", "Bash(ls:*)", "Bash(mkdir -p:*)", "Bash(cat:*)", "Bash(wc:*)",
+        "Bash(npx --no-install eslint:*)", "Bash(npx --no-install tsc:*)",
+        "Bash(ls:*)", "Bash(mkdir -p:*)", "Bash(wc:*)",
         "Bash(~/.claude/servant/bin/screenshot.sh:*)",
         "TodoWrite"
     ]
 }
 
 enum ConfigStore {
+    private static let lock = NSLock()
+    private static var lastGood: ServantConfig?
+    private static var lastMTime: Date?
+    /// True while config.json exists but cannot be parsed; saving is disabled so the user's file is never clobbered.
+    private(set) static var parseFailed = false
+
+    private static func mtime() -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: Paths.config.path)[.modificationDate]) as? Date
+    }
+
     static func loadOrCreate() -> ServantConfig {
+        lock.lock(); defer { lock.unlock() }
         Paths.ensureDirs()
-        if let data = try? Data(contentsOf: Paths.config),
-           let cfg = try? JSONDecoder().decode(ServantConfig.self, from: data) {
-            return cfg
+        let m = mtime()
+        if let good = lastGood, let m, m == lastMTime { return good }
+        if let data = try? Data(contentsOf: Paths.config) {
+            if let cfg = try? JSONDecoder().decode(ServantConfig.self, from: data) {
+                lastGood = cfg; lastMTime = m; parseFailed = false
+                return cfg
+            }
+            if !parseFailed { NSLog("Claude Servant: config.json could not be parsed; keeping last good config and disabling saves") }
+            parseFailed = true
+            return lastGood ?? ServantConfig()
         }
         let cfg = ServantConfig()
-        // Only write defaults when no config exists; never clobber a file that failed to parse.
-        if !FileManager.default.fileExists(atPath: Paths.config.path) { save(cfg) }
-        else { NSLog("Claude Servant: config.json could not be parsed; using defaults") }
+        writeLocked(cfg)
         return cfg
     }
 
     static func save(_ cfg: ServantConfig) {
+        lock.lock(); defer { lock.unlock() }
+        guard !parseFailed else { NSLog("Claude Servant: not saving, config.json has a syntax error"); return }
+        writeLocked(cfg)
+    }
+
+    private static func writeLocked(_ cfg: ServantConfig) {
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .withoutEscapingSlashes]
-        if let data = try? enc.encode(cfg) { try? data.write(to: Paths.config, options: .atomic) }
+        if let data = try? enc.encode(cfg), (try? data.write(to: Paths.config, options: .atomic)) != nil {
+            lastGood = cfg; lastMTime = mtime()
+        }
     }
 }
 
@@ -164,7 +190,14 @@ extension ServantConfig {
         askCooldownHours = try c.decodeIfPresent(Double.self, forKey: .askCooldownHours) ?? d.askCooldownHours
         maxTurns = try c.decodeIfPresent(Int.self, forKey: .maxTurns) ?? d.maxTurns
         baseAllowedTools = try c.decodeIfPresent([String].self, forKey: .baseAllowedTools) ?? d.baseAllowedTools
-        projects = try c.decodeIfPresent([ProjectConfig].self, forKey: .projects) ?? d.projects
+        var ps = try c.decodeIfPresent([ProjectConfig].self, forKey: .projects) ?? d.projects
+        var seen = Set<String>()
+        for i in ps.indices {
+            var id = ps[i].id, n = 2
+            while seen.contains(id) { id = "\(ps[i].id)-\(n)"; n += 1 }
+            ps[i].id = id; seen.insert(id)
+        }
+        projects = ps
     }
 }
 

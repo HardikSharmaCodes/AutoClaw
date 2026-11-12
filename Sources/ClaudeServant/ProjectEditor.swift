@@ -11,6 +11,7 @@ struct ProjectEditor: View {
     @State private var portText = ""
     @State private var extraToolsText = ""
     @State private var confirmDelete = false
+    @State private var loadedEnabled = true
 
     var body: some View {
         Group {
@@ -34,6 +35,7 @@ struct ProjectEditor: View {
             draft = nil; return
         }
         draft = p
+        loadedEnabled = p.enabled
         devCommandText = (p.devCommand ?? []).joined(separator: " ")
         portText = p.devPort.map(String.init) ?? ""
         extraToolsText = (p.extraAllowedTools ?? []).joined(separator: "\n")
@@ -132,14 +134,28 @@ struct ProjectEditor: View {
         }
     }
 
+    /// Splits a command line on spaces, honouring "double" and 'single' quotes.
+    static func splitCommand(_ s: String) -> [String] {
+        var out: [String] = [], cur = "", quote: Character?, has = false
+        for ch in s {
+            if let q = quote { if ch == q { quote = nil } else { cur.append(ch) } }
+            else if ch == "\"" || ch == "'" { quote = ch; has = true }
+            else if ch == " " || ch == "\t" { if has || !cur.isEmpty { out.append(cur); cur = ""; has = false } }
+            else { cur.append(ch) }
+        }
+        if has || !cur.isEmpty { out.append(cur) }
+        return out
+    }
+
     private func save(_ p: ProjectConfig) {
         var p = p
-        let cmd = devCommandText.split(separator: " ").map(String.init)
+        let cmd = Self.splitCommand(devCommandText)
         p.devCommand = cmd.isEmpty ? nil : cmd
         p.devPort = Int(portText.trimmingCharacters(in: .whitespaces)) ?? (cmd.isEmpty ? nil : 3123)
         let tools = extraToolsText.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         p.extraAllowedTools = tools.isEmpty ? nil : tools
         if p.name.trimmingCharacters(in: .whitespaces).isEmpty { p.name = URL(fileURLWithPath: p.expandedPath).lastPathComponent }
+        if p.enabled == loadedEnabled, let cur = model.config.projects.first(where: { $0.id == p.id }) { p.enabled = cur.enabled }  // keep menu toggles made while editing
         model.updateProject(p)
         dismissWindow(id: "project-editor")
     }

@@ -13,6 +13,7 @@ get() { printf '%s' "$input" | plutil -extract "$1" raw -o - - 2>/dev/null; }
 model=$(get model.display_name)
 five=$(get rate_limits.five_hour.used_percentage)
 week=$(get rate_limits.seven_day.used_percentage)
+export LC_ALL=C
 out="${model:-Claude}"
 [ -n "$five" ] && out="$out · 5h $(printf '%.0f' "$five")%"
 [ -n "$week" ] && out="$out · 7d $(printf '%.0f' "$week")%"
